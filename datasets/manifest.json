@@ -1,0 +1,68 @@
+[
+  {
+    "name": "uniform_n10",
+    "n": 10,
+    "metric": "euclidean",
+    "file": "datasets/uniform_n10.json"
+  },
+  {
+    "name": "uniform_n20",
+    "n": 20,
+    "metric": "euclidean",
+    "file": "datasets/uniform_n20.json"
+  },
+  {
+    "name": "uniform_n50",
+    "n": 50,
+    "metric": "euclidean",
+    "file": "datasets/uniform_n50.json"
+  },
+  {
+    "name": "uniform_n100",
+    "n": 100,
+    "metric": "euclidean",
+    "file": "datasets/uniform_n100.json"
+  },
+  {
+    "name": "uniform_n200",
+    "n": 200,
+    "metric": "euclidean",
+    "file": "datasets/uniform_n200.json"
+  },
+  {
+    "name": "clustered_n30",
+    "n": 30,
+    "metric": "euclidean",
+    "file": "datasets/clustered_n30.json"
+  },
+  {
+    "name": "clustered_n80",
+    "n": 80,
+    "metric": "euclidean",
+    "file": "datasets/clustered_n80.json"
+  },
+  {
+    "name": "clustered_n150",
+    "n": 150,
+    "metric": "euclidean",
+    "file": "datasets/clustered_n150.json"
+  },
+  {
+    "name": "grid_n25",
+    "n": 25,
+    "metric": "euclidean",
+    "file": "datasets/grid_n25.json"
+  },
+  {
+    "name": "grid_n64",
+    "n": 64,
+    "metric": "euclidean",
+    "file": "datasets/grid_n64.json"
+  },
+  {
+    "name": "grid_n100",
+    "n": 100,
+    "metric": "euclidean",
+    "file": "datasets/grid_n100.json"
+  }
+]
