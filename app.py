@@ -4,7 +4,9 @@ Integrasi tsp_studio dibatasi pada API yang dicontohkan di README.
 """
 from __future__ import annotations
 
+import inspect
 import io
+import statistics
 import tempfile
 from pathlib import Path
 
@@ -21,7 +23,6 @@ SAMPLE_FILE = ROOT / "data" / "sample_coordinates.xlsx"
 
 st.set_page_config(page_title="TSP Optimizer", layout="wide", initial_sidebar_state="expanded")
 
-# Warna grafik mengikuti palet yang diminta; teks tetap kontras pada tema gelap.
 BEST = "#56B4E9"
 CURRENT = "#E69F00"
 START = "#009E73"
@@ -41,12 +42,20 @@ ALGORITHMS = {
     "Tabu Search": "tabu_search",
     "Held-Karp (eksak)": "held_karp_exact",
 }
+EXACT = "Held-Karp (eksak)"
 CONSTRUCTION = [
     "Nearest Neighbor", "Nearest Insertion", "Cheapest Insertion",
     "Farthest Insertion", "Arbitrary Insertion",
 ]
 LOCAL_SEARCH = ["2-opt", "3-opt"]
 META = ["Simulated Annealing", "Tabu Search"]
+
+HELD_KARP_MAX_N = 18
+STOCHASTIC_STAGES = {"simulated_annealing", "tabu_search"}
+STAGE_KEYS = {
+    "simulated_annealing": {"seed", "T_max", "T_min", "alpha", "max_iter_per_temp"},
+    "tabu_search": {"seed", "max_iterations", "tabu_tenure", "neighborhood_size"},
+}
 
 
 def init_state() -> None:
@@ -57,12 +66,10 @@ def init_state() -> None:
 
 
 def style_figure(fig):
-    """Samakan warna latar, label, grid, dan legenda untuk tema gelap."""
     fig.patch.set_facecolor("#0E1117")
     for ax in fig.axes:
         ax.set_facecolor("#0E1117")
         ax.tick_params(colors=TEXT, labelsize=10)
-        # Pastikan label/anotasi nama kota pada grafik terbaca di tema gelap.
         for annotation in ax.texts:
             annotation.set_color("#FFFFFF")
         ax.xaxis.label.set_color(TEXT)
@@ -86,7 +93,6 @@ def close_figure(fig) -> None:
 
 
 def load_excel_bytes(data: bytes, filename: str):
-    """Gunakan parser resmi proyek dan berikan pesan yang bisa dipahami."""
     suffix = Path(filename).suffix or ".xlsx"
     temp_path = None
     try:
@@ -107,7 +113,6 @@ def load_excel_bytes(data: bytes, filename: str):
 
 
 def generate_excel(pattern: str, n: int, seed: int) -> bytes:
-    """Buat koordinat sintetis sendiri lalu serahkan parsing ke load_excel."""
     import random
     rng = random.Random(seed)
     points = []
@@ -146,51 +151,66 @@ def city_table(problem) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def make_pipeline_names(selected: list[str]) -> list[tuple[str, list[str]]]:
-    """Bangun pipeline yang valid: satu konstruksi, lalu optional local search/metaheuristic."""
-    labels = []
-    constructions = [x for x in selected if x in CONSTRUCTION]
-    improvements = [x for x in selected if x in LOCAL_SEARCH]
-    metas = [x for x in selected if x in META]
-    exacts = [x for x in selected if x == "Held-Karp (eksak)"]
-    # Tambahkan pipeline gabungan sesuai urutan kategori: konstruksi -> local search -> metaheuristik.
-    # Ini memastikan pilihan Nearest Neighbor + 2-opt + Tabu Search benar-benar diuji sebagai satu pipeline.
-    starts = constructions or (["Nearest Neighbor"] if (improvements or metas) else [])
+def is_stochastic(stages: list[str]) -> bool:
+    return any(stage in STOCHASTIC_STAGES for stage in stages)
+
+
+def build_pipelines(selected: list[str]) -> tuple[list[tuple[str, list[str]]], str | None]:
+    constructions = [x for x in CONSTRUCTION if x in selected]
+    improvements = [x for x in LOCAL_SEARCH if x in selected]
+    metas = [x for x in META if x in selected]
+    exacts = [x for x in selected if x == EXACT]
+
+    notice = None
+    starts = constructions
+    if not starts and (improvements or metas):
+        starts = ["Nearest Neighbor"]
+        notice = (
+            "Tidak ada metode konstruksi yang dipilih, sehingga Nearest Neighbor dipakai sebagai "
+            "tahap awal dan ikut dijalankan sendiri sebagai pembanding."
+        )
+
+    specs = []
     for start in starts:
+        specs.append((start, [ALGORITHMS[start]]))
+        for step in improvements + metas:
+            specs.append((f"{start} → {step}", [ALGORITHMS[start], ALGORITHMS[step]]))
         combined = [start] + improvements + metas
-        labels.append((" → ".join(combined), [ALGORITHMS[s] for s in combined]))
-        # Sertakan juga varian perbaikan individual agar hasilnya dapat dibandingkan.
-        for improve in improvements:
-            labels.append((f"{start} → {improve}", [ALGORITHMS[start], ALGORITHMS[improve]]))
-        for meta in metas:
-            labels.append((f"{start} → {meta}", [ALGORITHMS[start], ALGORITHMS[meta]]))
-    if not starts:
-        for name in improvements + metas:
-            labels.append((name, [ALGORITHMS[name]]))
+        if len(combined) > 2:
+            specs.append((" → ".join(combined), [ALGORITHMS[s] for s in combined]))
     for exact in exacts:
-        labels.append((exact, [ALGORITHMS[exact]]))
-    # Hindari pipeline duplikat.
+        specs.append((exact, [ALGORITHMS[exact]]))
+
     unique, seen = [], set()
-    for label, stages in labels:
+    for label, stages in specs:
         key = tuple(stages)
         if key not in seen:
             seen.add(key)
             unique.append((label, stages))
-    return unique
+    return unique, notice
+
+
+def runnable_specs(specs, problem):
+    if problem is None:
+        return specs
+    return [
+        (label, stages) for label, stages in specs
+        if not ("held_karp_exact" in stages and problem.n > HELD_KARP_MAX_N)
+    ]
+
+
+def count_executions(specs, n_runs: int) -> int:
+    return sum(n_runs if is_stochastic(stages) else 1 for _, stages in specs)
 
 
 def recommend_algorithms(problem) -> list[dict[str, str]]:
-    """Rekomendasi berbasis ukuran masalah dan batas praktis algoritma.
-
-    Ini adalah panduan heuristik, bukan jaminan bahwa algoritma tertentu selalu terbaik.
-    """
     n = int(problem.n)
     recommendations: list[dict[str, str]] = []
 
-    if n <= 18:
+    if n <= HELD_KARP_MAX_N:
         recommendations.append({
             "priority": "Acuan kualitas terbaik",
-            "pipeline": "Held-Karp (eksak)",
+            "pipeline": EXACT,
             "reason": (
                 f"Ada {n} kota. Held-Karp dapat mencari solusi optimal secara eksak untuk ukuran ini, "
                 "sehingga cocok sebagai acuan untuk menilai kualitas hasil metode heuristik."
@@ -246,25 +266,70 @@ def recommend_algorithms(problem) -> list[dict[str, str]]:
     )
     if not has_coordinates:
         recommendations = [
-            {**item, "reason": item["reason"] + " Rekomendasi ini tetap dapat dipakai untuk matriks jarak."}
+            {**item, "reason": item["reason"] + " Panduan ini tetap dapat dipakai untuk matriks jarak."}
             for item in recommendations
         ]
     return recommendations
 
 
+def call_solve(solver, problem, params: dict):
+    signature = inspect.signature(solver.solve)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()):
+        return solver.solve(problem, **params)
+    accepted = {k: v for k, v in params.items() if k in signature.parameters}
+    return solver.solve(problem, **accepted)
+
+
 def run_one(label: str, stages: list[str], problem, params: dict):
-    if stages == ["held_karp_exact"]:
-        solver = get_algorithm("held_karp_exact")()
-    elif len(stages) == 1:
+    if len(stages) == 1:
         solver = get_algorithm(stages[0])()
-    else:
-        solver = make_pipeline(*stages, custom_name=label)
+        keys = STAGE_KEYS.get(stages[0], {"seed"})
+        return call_solve(solver, problem, {k: v for k, v in params.items() if k in keys})
+    solver = make_pipeline(*stages, custom_name=label)
     return solver.solve(problem, **params)
+
+
+def run_pipeline(label, stages, problem, params, n_runs, base_seed, on_step):
+    total = n_runs if is_stochastic(stages) else 1
+    solutions, errors = [], []
+    for i in range(total):
+        try:
+            solutions.append(run_one(label, stages, problem, {**params, "seed": base_seed + i}))
+        except Exception as exc:
+            errors.append(str(exc))
+        on_step()
+    if not solutions:
+        return {"label": label, "stages": stages, "solution": None, "solutions": [],
+                "runs": 0, "error": errors[0] if errors else "Tidak ada hasil."}
+    best = min(solutions, key=lambda s: s.length)
+    error = f"{len(errors)} dari {total} run gagal: {errors[0]}" if errors else None
+    return {"label": label, "stages": stages, "solution": best, "solutions": solutions,
+            "runs": len(solutions), "error": error}
+
+
+def summarize(result) -> dict:
+    solutions = result["solutions"]
+    lengths = [float(s.length) for s in solutions]
+    times = [float(s.runtime_sec) for s in solutions]
+    improvements = []
+    for sol in solutions:
+        value = ((sol.metadata or {}).get("insights") or {}).get("improvement_pct")
+        try:
+            if value is not None:
+                improvements.append(float(value))
+        except (TypeError, ValueError):
+            pass
+    return {
+        "mean": statistics.fmean(lengths),
+        "std": statistics.stdev(lengths) if len(lengths) > 1 else 0.0,
+        "best": min(lengths),
+        "time": statistics.fmean(times),
+        "improvement": statistics.fmean(improvements) if improvements else float("nan"),
+    }
 
 
 init_state()
 
-# Panel kiri: kontrol sesuai urutan alur kerja.
 with st.sidebar:
     st.header("TSP Optimizer")
     st.caption("Alur kerja")
@@ -328,13 +393,17 @@ with st.sidebar:
             "Pilih metode untuk dibandingkan",
             options=list(ALGORITHMS),
             default=["Nearest Neighbor", "2-opt", "Tabu Search"],
-            help="Pilih beberapa metode. Metode konstruksi dapat digabung dengan pencarian lokal atau metaheuristik.",
+            help="Pilih beberapa metode. Setiap metode konstruksi dijalankan sendiri sebagai pembanding, "
+                 "lalu digabung dengan pencarian lokal atau metaheuristik.",
         )
         st.caption("Pipeline dibuat dari metode konstruksi, lalu metode perbaikan yang dipilih.")
 
     with st.expander("3. Parameter", expanded=True):
         seed = st.number_input("Seed algoritma", min_value=0, max_value=999999, value=42,
-                               help="Gunakan seed yang sama untuk mengulang eksperimen acak.")
+                               help="Seed awal. Run ke-i memakai seed awal + i.")
+        n_runs = st.number_input("Jumlah run (metode stokastik)", min_value=1, max_value=50, value=5,
+                                 help="Simulated Annealing dan Tabu Search dijalankan sebanyak ini dengan seed "
+                                      "berurutan. Metode deterministik dijalankan sekali.")
         sa_selected = "Simulated Annealing" in selected
         tabu_selected = "Tabu Search" in selected
         if sa_selected:
@@ -362,7 +431,6 @@ with st.sidebar:
         run_button = st.button("Jalankan", type="primary", width="stretch",
                                help="Jalankan semua pipeline yang dipilih dan simpan hasilnya.")
 
-# Main area: plain title, tabs for all visualizations.
 st.title("Optimasi Rute TSP")
 
 problem = st.session_state["problem"]
@@ -375,8 +443,17 @@ else:
 
 if problem is not None and problem.n > 50 and "3-opt" in selected:
     st.warning("3-opt dapat berjalan lambat untuk lebih dari 50 kota. Pertimbangkan data yang lebih kecil.")
-if problem is not None and problem.n > 18 and "Held-Karp (eksak)" in selected:
-    st.warning("Held-Karp (eksak) dibatasi untuk maksimal 18 kota; metode ini tidak akan dijalankan.")
+if problem is not None and problem.n > HELD_KARP_MAX_N and EXACT in selected:
+    st.warning(f"Held-Karp (eksak) dibatasi untuk maksimal {HELD_KARP_MAX_N} kota; metode ini tidak akan dijalankan.")
+
+pipeline_specs, start_notice = build_pipelines(selected)
+runnable = runnable_specs(pipeline_specs, problem)
+if selected and start_notice:
+    st.info(start_notice)
+if problem is not None and runnable:
+    st.caption(
+        f"Akan menjalankan {len(runnable)} pipeline, total {count_executions(runnable, int(n_runs))} eksekusi."
+    )
 
 if run_button:
     if problem is None:
@@ -384,12 +461,7 @@ if run_button:
     elif not selected:
         st.error("Pilih minimal satu algoritma di bagian 2. Algoritma.")
     else:
-        pipeline_specs = make_pipeline_names(selected)
-        valid_specs = []
-        for label, stages in pipeline_specs:
-            if "held_karp_exact" in stages and problem.n > 18:
-                continue
-            valid_specs.append((label, stages))
+        valid_specs = runnable
         new_results = []
         params = {"seed": int(seed)}
         if sa_selected:
@@ -398,14 +470,17 @@ if run_button:
         if tabu_selected:
             params.update(max_iterations=int(tabu_iterations), tabu_tenure=int(tabu_tenure),
                           neighborhood_size=int(tabu_neighborhood))
+        total_steps = max(count_executions(valid_specs, int(n_runs)), 1)
+        step = {"n": 0}
         progress = st.progress(0, text="Menyiapkan perhitungan")
-        for i, (label, stages) in enumerate(valid_specs):
-            progress.progress(i / max(len(valid_specs), 1), text=f"Menjalankan: {label}")
-            try:
-                sol = run_one(label, stages, problem, params)
-                new_results.append({"label": label, "stages": stages, "solution": sol, "error": None})
-            except Exception as exc:
-                new_results.append({"label": label, "stages": stages, "solution": None, "error": str(exc)})
+        for label, stages in valid_specs:
+            def tick(label=label):
+                step["n"] += 1
+                progress.progress(min(step["n"] / total_steps, 1.0),
+                                  text=f"{label} ({step['n']}/{total_steps})")
+            new_results.append(
+                run_pipeline(label, stages, problem, params, int(n_runs), int(seed), tick)
+            )
         progress.progress(1.0, text="Selesai")
         st.session_state["results"] = new_results
         st.session_state["last_run_key"] = (st.session_state["problem_label"], problem.n, int(seed))
@@ -413,18 +488,18 @@ if run_button:
         if not valid_specs:
             st.warning("Tidak ada metode yang dapat dijalankan dengan batas ukuran data saat ini.")
 
-tabs = st.tabs(["Rekomendasi", "Rute", "Konvergensi", "Perbandingan", "Detail"])
+tabs = st.tabs(["Panduan", "Rute", "Konvergensi", "Perbandingan", "Detail"])
 valid_results = [r for r in results if r.get("solution") is not None]
 errors = [r for r in results if r.get("error")]
 
 with tabs[0]:
-    st.subheader("Rekomendasi algoritma")
+    st.subheader("Panduan heuristik berdasarkan ukuran data")
     st.write(
-        "Pilih metode sendiri seperti biasa. Bagian ini memberi saran awal berdasarkan jumlah kota "
-        "dan karakteristik praktis algoritma; rekomendasi bukan jaminan solusi terbaik."
+        "Bagian ini hanya aturan praktis berdasarkan jumlah kota, bukan hasil eksperimen pada data Anda. "
+        "Pilih metode sendiri, lalu buktikan mana yang lebih baik di tab Perbandingan."
     )
     if problem is None:
-        st.info("Muat data terlebih dahulu di panel kiri agar rekomendasi dapat disesuaikan dengan ukuran masalah.")
+        st.info("Muat data terlebih dahulu di panel kiri agar panduan dapat disesuaikan dengan ukuran masalah.")
     else:
         st.caption(f"Analisis untuk {problem.n} kota.")
         for item in recommend_algorithms(problem):
@@ -432,11 +507,11 @@ with tabs[0]:
                 st.caption(item["priority"])
                 st.markdown(f"**{item['pipeline']}**")
                 st.write(item["reason"])
-                if item["pipeline"] == "Held-Karp (eksak)":
-                    st.caption("Tersedia di aplikasi jika jumlah kota tidak lebih dari 18.")
+                if item["pipeline"] == EXACT:
+                    st.caption(f"Tersedia di aplikasi jika jumlah kota tidak lebih dari {HELD_KARP_MAX_N}.")
         st.info(
-            "Saran praktis: jalankan dua atau tiga kandidat dengan seed dan parameter yang sama, "
-            "lalu pilih berdasarkan panjang rute dan waktu eksekusi pada tab Perbandingan."
+            "Saran praktis: jalankan dua atau tiga kandidat dengan beberapa run dan parameter yang sama, "
+            "lalu bandingkan rata-rata, simpangan baku, dan waktu eksekusi pada tab Perbandingan."
         )
 
 with tabs[1]:
@@ -452,7 +527,10 @@ with tabs[1]:
             style_figure(fig)
             st.pyplot(fig, width="stretch")
             close_figure(fig)
-            st.caption(f"Rute melewati {problem.n} kota, panjang {chosen_route['solution'].length:.2f}.")
+            st.caption(
+                f"Rute run terbaik dari {chosen_route['runs']} run: melewati {problem.n} kota, "
+                f"panjang {chosen_route['solution'].length:.2f}."
+            )
         except ValueError:
             st.warning("Peta rute hanya tersedia untuk data koordinat; dataset ini berupa matriks jarak.")
 
@@ -472,58 +550,87 @@ with tabs[2]:
         meta = conv["solution"].metadata or {}
         fig = plot_convergence_curve(meta["history_best"], meta["history_current"],
                                      title=f"Konvergensi — {convergence_choice}")
-        # Gunakan gaya garis dan marker berbeda, selain warna, untuk membedakan seri.
         ax = fig.axes[0]
         for line in ax.lines:
-            if "Current" in line.get_label() or "current" in line.get_label().lower():
+            if "current" in line.get_label().lower():
                 line.set_color(CURRENT)
                 line.set_linestyle("--")
                 line.set_marker("x")
                 line.set_markevery(max(1, len(line.get_xdata()) // 12))
-                line.set_label("Rute yang sedang dicoba (garis putus-putus)")
+                line.set_label("Solusi saat ini yang diterima (garis putus-putus)")
             else:
                 line.set_color(BEST)
                 line.set_linestyle("-")
                 line.set_marker("o")
                 line.set_markevery(max(1, len(line.get_xdata()) // 12))
-                line.set_label("Rute terbaik (garis penuh)")
+                line.set_label("Rute terbaik sejauh ini (garis penuh)")
+        ax.legend()
         style_figure(fig)
         st.pyplot(fig, width="stretch")
         close_figure(fig)
-        st.caption("Garis penuh menunjukkan rute terbaik sejauh ini; garis putus-putus menunjukkan rute yang sedang dicoba.")
+        st.caption(
+            "Garis penuh adalah rute terbaik sejauh ini dan tidak pernah naik. Garis putus-putus adalah solusi "
+            "saat ini yang diterima algoritma, bukan kandidat yang sedang diuji. Garis ini bisa lebih buruk "
+            "dari yang terbaik: Simulated Annealing menerima langkah yang lebih buruk dengan peluang tertentu, "
+            f"dan Tabu Search harus berpindah ke tetangga terbaik yang tidak tabu meski lebih buruk. "
+            f"Grafik berasal dari run terbaik dari {conv['runs']} run."
+        )
 
 with tabs[3]:
     if not valid_results:
         st.info("Jalankan setidaknya satu pipeline untuk melihat tabel perbandingan.")
     else:
-        sorted_results = sorted(valid_results, key=lambda r: r["solution"].length)
-        best_length = sorted_results[0]["solution"].length
+        summaries = [(r, summarize(r)) for r in valid_results]
+        overall_best = min(s["best"] for _, s in summaries)
+        exact_length = next((s["best"] for r, s in summaries if "held_karp_exact" in r["stages"]), None)
+        ordered = sorted(summaries, key=lambda item: item[1]["mean"])
         rows = []
-        for rank, result in enumerate(sorted_results, 1):
-            sol = result["solution"]
-            insights = (sol.metadata or {}).get("insights", {})
-            improvement = insights.get("improvement_pct")
-            if improvement is None:
-                improvement = 0.0
+        for rank, (result, summary) in enumerate(ordered, 1):
             rows.append({
                 "Peringkat": rank,
                 "Pipeline": result["label"],
-                "Panjang rute": float(sol.length),
-                "Waktu (detik)": float(sol.runtime_sec),
-                "Perbaikan (%)": float(improvement),
-                "Selisih dari terbaik (%)": ((sol.length - best_length) / best_length * 100) if best_length else 0.0,
+                "Jumlah run": result["runs"],
+                "Panjang rata-rata": summary["mean"],
+                "Simpangan baku": summary["std"],
+                "Panjang terbaik": summary["best"],
+                "Waktu rata-rata (detik)": summary["time"],
+                "Perbaikan rata-rata (%)": summary["improvement"],
+                "Selisih dari terbaik yang ditemukan (%)": (
+                    (summary["mean"] - overall_best) / overall_best * 100 if overall_best else 0.0
+                ),
+                "Gap optimal (%)": (
+                    (summary["mean"] - exact_length) / exact_length * 100 if exact_length else float("nan")
+                ),
             })
         comparison = pd.DataFrame(rows)
         st.dataframe(comparison, hide_index=True, width="stretch",
                      column_config={
-                         "Panjang rute": st.column_config.NumberColumn(format="%.2f"),
-                         "Waktu (detik)": st.column_config.NumberColumn(format="%.4f"),
-                         "Perbaikan (%)": st.column_config.NumberColumn(format="%.2f"),
-                         "Selisih dari terbaik (%)": st.column_config.NumberColumn(format="%.2f"),
+                         "Jumlah run": st.column_config.NumberColumn(format="%d"),
+                         "Panjang rata-rata": st.column_config.NumberColumn(format="%.2f"),
+                         "Simpangan baku": st.column_config.NumberColumn(format="%.2f"),
+                         "Panjang terbaik": st.column_config.NumberColumn(format="%.2f"),
+                         "Waktu rata-rata (detik)": st.column_config.NumberColumn(format="%.4f"),
+                         "Perbaikan rata-rata (%)": st.column_config.NumberColumn(format="%.2f"),
+                         "Selisih dari terbaik yang ditemukan (%)": st.column_config.NumberColumn(format="%.2f"),
+                         "Gap optimal (%)": st.column_config.NumberColumn(format="%.2f"),
                      })
         st.download_button("Unduh perbandingan CSV", comparison.to_csv(index=False).encode("utf-8"),
                            file_name="perbandingan_tsp.csv", mime="text/csv")
-        st.caption(f"Tabel membandingkan {len(comparison)} pipeline; panjang rute terkecil adalah {best_length:.2f}.")
+        st.caption(
+            f"Tabel membandingkan {len(comparison)} pipeline, diurutkan menurut panjang rute rata-rata. "
+            "Metode stokastik (Simulated Annealing, Tabu Search) dijalankan beberapa kali dengan seed berurutan; "
+            "metode deterministik dijalankan sekali, sehingga simpangan bakunya 0."
+        )
+        if exact_length is None:
+            st.caption(
+                "Selisih dihitung terhadap rute terpendek yang ditemukan pada sesi ini, bukan terhadap optimum "
+                f"sejati. Kolom Gap optimal hanya terisi jika Held-Karp ikut dijalankan (maksimal {HELD_KARP_MAX_N} kota)."
+            )
+        else:
+            st.caption(
+                f"Gap optimal memakai hasil Held-Karp ({exact_length:.2f}) sebagai optimum. Selisih dari terbaik "
+                "yang ditemukan tetap dihitung terhadap rute terpendek di antara semua pipeline."
+            )
 
 with tabs[4]:
     if not valid_results:
@@ -534,8 +641,14 @@ with tabs[4]:
                                      help="Pilih pipeline untuk melihat urutan kota dan ringkasan algoritma.")
         detail = next(r for r in valid_results if r["label"] == detail_choice)
         sol = detail["solution"]
-        st.metric("Panjang rute", f"{sol.length:.2f}")
-        st.metric("Waktu eksekusi", f"{sol.runtime_sec:.4f} detik")
+        summary = summarize(detail)
+        col_best, col_mean, col_time = st.columns(3)
+        col_best.metric("Panjang terbaik", f"{summary['best']:.2f}")
+        col_mean.metric("Rata-rata ± simpangan baku", f"{summary['mean']:.2f} ± {summary['std']:.2f}")
+        col_time.metric("Waktu rata-rata", f"{summary['time']:.4f} detik")
+        st.caption(
+            f"Ringkasan proses dan urutan kunjungan di bawah berasal dari run terbaik dari {detail['runs']} run."
+        )
         st.write("**Tahapan pipeline**")
         st.code(" → ".join(detail["stages"]), language=None)
         st.write("**Ringkasan proses**")

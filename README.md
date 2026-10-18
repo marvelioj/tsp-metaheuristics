@@ -4,12 +4,17 @@ Tugas kelompok: aplikasi untuk menyelesaikan Travelling Salesman Problem (TSP)
 dengan konstruksi greedy, local search (2-opt, 3-opt), Simulated Annealing, dan
 Tabu Search, plus perbandingan hasilnya.
 
-**Anggota:** _(isi nama dan NRP)_
+**Anggota:**
+- Mochammad Alief Afghani (5052241008)
+- Shafira Fajriyatul Hasanah (5052241011)
+- Marvelio Jonathan Wijaya (5052241017)
+- Riska Karina Tarigan (5052241028)
+- Shafa Agnia Ramadhan (5052241029)
 
 ## Struktur
 
 ```
-app.py                      # aplikasi (Streamlit), belum dibuat
+app.py                      # aplikasi Streamlit
 tsp_studio/
 ├── core/                   # City, TSPProblem, metrik jarak
 ├── algorithms/
@@ -41,6 +46,85 @@ pip install -r requirements.txt
 pytest                                  # semua tes harus lulus
 python -m tsp_studio.scripts.benchmark  # tabel perbandingan semua algoritma
 ```
+
+## Menjalankan aplikasi
+
+```bash
+streamlit run app.py
+```
+
+Jalankan dari folder proyek (yang berisi `app.py` dan `data/`). Aplikasi memakai
+parameter `width="stretch"`, sehingga membutuhkan Streamlit versi terbaru.
+
+### Alur penggunaan
+
+1. **Data**: pilih data contoh (`data/sample_coordinates.xlsx`), unggah file Excel
+   (.xlsx), atau buat data acak (tersebar merata, berkelompok, atau kisi).
+2. **Algoritma**: pilih beberapa metode untuk dibandingkan.
+3. **Parameter**: atur seed, jumlah run, dan parameter SA/Tabu (hanya tampil untuk
+   metode yang dipilih).
+4. **Jalankan**: aplikasi menampilkan jumlah pipeline dan total eksekusi sebelum
+   dijalankan.
+
+### Cara pipeline dibentuk
+
+- Setiap metode konstruksi yang dipilih **dijalankan sendiri** sebagai baseline,
+  lalu digabung dengan tiap metode local search/metaheuristik yang dipilih, dan
+  satu pipeline lengkap bila ada lebih dari satu tahap tambahan.
+- Contoh: memilih Nearest Neighbor + 2-opt + Tabu Search menghasilkan
+  `Nearest Neighbor`, `Nearest Neighbor → 2-opt`, `Nearest Neighbor → Tabu Search`,
+  dan `Nearest Neighbor → 2-opt → Tabu Search`.
+- Jika tidak ada metode konstruksi yang dipilih, Nearest Neighbor dipakai sebagai
+  tahap awal (aplikasi menampilkan pemberitahuan).
+- Urutan tahap selalu: konstruksi → local search → metaheuristik.
+- Held-Karp dijalankan terpisah dan hanya untuk n <= 18.
+
+### Multi-run
+
+Simulated Annealing dan Tabu Search bersifat stokastik, sehingga dijalankan
+sebanyak **Jumlah run** (default 5) dengan seed berurutan: seed awal, seed awal + 1,
+dan seterusnya. Pipeline tanpa tahap stokastik dijalankan satu kali (simpangan
+baku 0). Waktu proses SA/Tabu bertambah kira-kira sebesar jumlah run.
+
+### Tab pada aplikasi
+
+| Tab | Isi |
+|---|---|
+| Panduan | Aturan praktis berdasarkan jumlah kota. Bukan hasil eksperimen pada data pengguna. |
+| Rute | Peta rute dari run terbaik pipeline yang dipilih (hanya untuk data koordinat). |
+| Konvergensi | Riwayat pencarian SA/Tabu dari run terbaik. Garis penuh: rute terbaik sejauh ini. Garis putus-putus: solusi saat ini yang diterima algoritma (bukan kandidat yang sedang diuji), yang bisa lebih buruk dari yang terbaik. |
+| Perbandingan | Tabel hasil seluruh pipeline, diurutkan menurut panjang rata-rata, dengan unduhan CSV. |
+| Detail | Ringkasan satu pipeline: panjang terbaik, rata-rata ± simpangan baku, waktu, insight, dan urutan kunjungan. |
+
+### Membaca tabel Perbandingan
+
+| Kolom | Arti |
+|---|---|
+| Jumlah run | Banyak eksekusi yang berhasil untuk pipeline tersebut |
+| Panjang rata-rata, Simpangan baku, Panjang terbaik | Statistik panjang rute dari semua run |
+| Waktu rata-rata (detik) | Rata-rata waktu eksekusi per run |
+| Perbaikan rata-rata (%) | Dari `insights`; NaN bila metode tidak menyediakannya (bukan 0) |
+| Selisih dari terbaik yang ditemukan (%) | Dibanding rute terpendek di antara semua pipeline pada sesi itu. **Bukan** gap terhadap optimum. |
+| Gap optimal (%) | Dibanding hasil Held-Karp. Hanya terisi bila Held-Karp ikut dijalankan (n <= 18). |
+
+### Default parameter di aplikasi
+
+| Algoritma | Default |
+|---|---|
+| Simulated Annealing | `T_max=100`, `T_min=0.1`, `alpha=0.99`, `max_iter_per_temp=50` |
+| Tabu Search | `max_iterations=500`, `tabu_tenure=20`, `neighborhood_size=60` |
+
+Default ini berbeda dari contoh API di bawah (`T_max=1000`, `T_min=1e-3`). Skala
+suhu perlu disesuaikan dengan ukuran jarak data, terutama untuk dataset kisi
+(jarak antar kota 1).
+
+### Batasan aplikasi
+
+- Varian `teammate.py` belum tersedia di aplikasi.
+- Satu run SA/Tabu dihitung penuh sebelum hasil tampil; aplikasi tidak bisa
+  membatalkan proses yang sedang berjalan.
+- Peringatan ditampilkan untuk 3-opt pada n > 50.
+- Upload hanya menerima `.xlsx`.
 
 ## Cara pakai (API untuk aplikasi)
 
@@ -106,11 +190,3 @@ hasilnya tidak reproducible; keduanya juga tidak mengisi `insights`/`history_cur
 Insertion biasa, `cheapest_insertion`, `nearest_insertion`, dan `Pipeline` versi tim
 tidak dimasukkan karena hasilnya identik dengan versi yang sudah ada (diuji pada
 11 dataset) atau fungsinya sudah tercakup.
-
-## Status
-
-- [x] Konstruksi (NN, insertion), 2-opt, 3-opt, Held-Karp
-- [x] Simulated Annealing, Tabu Search (sebagai `Solver`), loader Excel, plot, tes
-- [ ] Aplikasi (`app.py`)
-- [ ] Ilustrasi Tabu Search n=6 dengan data tugas 1 (`docs/`): gunakan `deterministic=True, record_log=True`
-- [ ] Paper, panduan pengguna, PPT
