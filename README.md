@@ -28,8 +28,8 @@ tsp_studio/
 tests/                      # pytest
 datasets/                   # dataset sintetis (JSON)
 data/sample_coordinates.xlsx   # contoh file input Excel
-docs/                       # paper, ilustrasi tabu, panduan pengguna
-presentation/               # PPT
+docs/                       # ppt, laporan, contoh tabu manual
+└── Tabu_Search_Manual.xlsx
 ```
 
 ## Instalasi
